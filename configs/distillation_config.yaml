@@ -1,0 +1,51 @@
+models:
+  teacher: "google/flan-t5-base"
+  student: "google/flan-t5-small"
+  embedder: "sentence-transformers/all-MiniLM-L6-v2"
+  # Uncomment to use Ollama as teacher instead (requires local Ollama install)
+  # ollama_teacher: "mistral:7b-instruct-q4_K_M"
+
+dataset:
+  name: "rajpurkar/squad_v2"
+  train_split: "train[:10000]"   # 10k for fast iteration; use "train" for full run
+  val_split: "validation[:1000]"
+  max_input_length: 512
+  max_target_length: 64
+
+rag:
+  chroma_persist_dir: "./chroma_db"
+  collection_name: "squad_contexts"
+  top_k: 3
+  chunk_size: 256
+  chunk_overlap: 32
+
+distillation:
+  temperature: 4.0
+  alpha: 0.5    # L_RAG weight  (student vs RAG-augmented teacher)
+  beta: 0.2     # L_KL weight   (student vs bare teacher)
+  gamma: 0.1    # L_CRA weight  (contrastive retrieval alignment)
+  delta: 0.2    # L_CE weight   (hard-label grounding)
+  cra_margin: 0.5
+
+training:
+  batch_size: 8
+  gradient_accumulation_steps: 4   # effective batch size = 32
+  learning_rate: 3.0e-4
+  num_epochs: 3
+  warmup_ratio: 0.1
+  fp16: true
+  output_dir: "./outputs/student_rad"
+  save_steps: 500
+  eval_steps: 250
+  logging_steps: 50
+  max_grad_norm: 1.0
+
+soft_labels:
+  output_dir: "./soft_labels"
+
+evaluation:
+  metrics:
+    - "exact_match"
+    - "f1"
+    - "bleu"
+    - "perplexity"
