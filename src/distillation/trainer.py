@@ -3,20 +3,40 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Optional
 
 import torch
 from torch.cuda.amp import GradScaler, autocast
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from src.student.student_model import StudentModel
 from src.teacher.rag_teacher import RAGTeacher
 from .loss import RADLoss
+
+
+def _gpu_memory_check(student: StudentModel, rag_teacher: RAGTeacher) -> None:
+    """Warn if VRAM is low; assert student and teacher are on the same device."""
+    if torch.cuda.is_available():
+        total_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
+        if total_gb < 12:
+            print(
+                f"WARNING: {total_gb:.1f} GB VRAM detected. "
+                "Consider reducing batch_size to 4 and gradient_accumulation_steps to 8."
+            )
+        else:
+            print(f"GPU: {torch.cuda.get_device_name(0)} ({total_gb:.1f} GB VRAM)")
+
+    teacher_device = rag_teacher.teacher.device
+    student_device = student.device
+    if teacher_device != student_device:
+        # This is only a soft warning — device_map="auto" may spread layers across devices
+        print(
+            f"NOTE: student on '{student_device}', teacher on '{teacher_device}'. "
+            "Logits will be moved to student device during loss computation."
+        )
 
 
 class RADTrainer:
@@ -53,6 +73,8 @@ class RADTrainer:
         self.grad_accum = gradient_accumulation_steps
         self.disable_cra = disable_cra
 
+        _gpu_memory_check(student, rag_teacher)
+
         self.optimizer = AdamW(student.parameters(), lr=learning_rate, weight_decay=0.01)
         self.scaler = GradScaler(enabled=self.fp16)
         self.history: list[dict] = []
@@ -63,7 +85,6 @@ class RADTrainer:
         pad_id = self.student.tokenizer.pad_token_id
         decoder_input = labels.clone()
         decoder_input[decoder_input == -100] = pad_id
-        # Prepend decoder_start_token (pad token for T5)
         bos = torch.full((labels.size(0), 1), pad_id, dtype=torch.long)
         decoder_input = torch.cat([bos, decoder_input[:, :-1]], dim=1)
         return decoder_input
@@ -86,7 +107,6 @@ class RADTrainer:
                 questions, decoder_input_ids
             )
 
-            # If CRA is disabled, zero out neg_logits contribution
             if self.disable_cra:
                 neg_logits = bare_logits
 
@@ -114,7 +134,6 @@ class RADTrainer:
                 self.optimizer.zero_grad()
                 self.global_step += 1
 
-                # Log
                 if self.global_step % self.logging_steps == 0:
                     log_entry = {
                         "step": self.global_step,
@@ -132,7 +151,6 @@ class RADTrainer:
                         f"L_CRA={log_entry['L_CRA']:.4f}  L_CE={log_entry['L_CE']:.4f}"
                     )
 
-                # Checkpoint
                 if self.global_step % self.save_steps == 0:
                     self._save(f"checkpoint-{self.global_step}")
 

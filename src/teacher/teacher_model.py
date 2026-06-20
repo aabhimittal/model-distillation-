@@ -9,17 +9,31 @@ from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
 
 class TeacherModel:
-    def __init__(self, model_name: str = "google/flan-t5-base", device: Optional[str] = None):
+    def __init__(
+        self,
+        model_name: str = "google/flan-t5-base",
+        device: Optional[str] = None,
+        device_map: Optional[str] = None,
+    ):
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = device
         self.model_name = model_name
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModelForSeq2SeqLM.from_pretrained(
-            model_name,
-            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-        ).to(device)
+
+        load_kwargs: dict = {}
+        if device_map:
+            # Multi-GPU (e.g. Kaggle 2×T4): let HF distribute layers automatically
+            load_kwargs["device_map"] = device_map
+        else:
+            load_kwargs["torch_dtype"] = torch.float16 if device == "cuda" else torch.float32
+
+        self.model = AutoModelForSeq2SeqLM.from_pretrained(model_name, **load_kwargs)
+
+        if not device_map:
+            self.model = self.model.to(device)
+
         self.model.eval()
         for param in self.model.parameters():
             param.requires_grad_(False)
@@ -40,7 +54,9 @@ class TeacherModel:
         return outputs.logits  # stays on self.device
 
     @torch.no_grad()
-    def generate_text(self, input_ids: torch.Tensor, attention_mask: torch.Tensor, max_new_tokens: int = 64) -> list[str]:
+    def generate_text(
+        self, input_ids: torch.Tensor, attention_mask: torch.Tensor, max_new_tokens: int = 64
+    ) -> list[str]:
         """Generate text for qualitative evaluation."""
         outputs = self.model.generate(
             input_ids=input_ids.to(self.device),

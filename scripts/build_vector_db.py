@@ -2,9 +2,12 @@
 Phase 1: Build the ChromaDB vector store from SQuAD v2 contexts.
 
 Usage:
-    python scripts/build_vector_db.py [--config configs/distillation_config.yaml]
+    python scripts/build_vector_db.py [--config ...] [--chroma-dir ...]
 
 Idempotent: checks collection size before embedding, skips if already populated.
+
+Colab example:
+    python scripts/build_vector_db.py --chroma-dir /content/drive/MyDrive/rad/chroma_db
 """
 
 import argparse
@@ -20,9 +23,13 @@ from src.rag.embedder import Embedder
 from src.rag.chroma_store import ChromaStore
 
 
-def main(config_path: str) -> None:
+def main(config_path: str, chroma_dir: str | None) -> None:
     with open(config_path) as f:
         cfg = yaml.safe_load(f)
+
+    # CLI flag overrides YAML config
+    if chroma_dir:
+        cfg["rag"]["chroma_persist_dir"] = chroma_dir
 
     print("Loading SQuAD v2 train split...")
     dataset = load_squad("train")
@@ -46,7 +53,7 @@ def main(config_path: str) -> None:
 
     existing = store.collection_size()
     if existing >= len(chunks):
-        print(f"ChromaDB already contains {existing} documents. Skipping embedding. ✓")
+        print(f"ChromaDB already contains {existing} documents. Skipping embedding.")
         return
 
     print(f"ChromaDB has {existing} docs; need {len(chunks)}. Embedding...")
@@ -57,11 +64,13 @@ def main(config_path: str) -> None:
     store.add_documents(chunks, embeddings, metadata)
 
     final_size = store.collection_size()
-    print(f"\nDone. ChromaDB collection '{cfg['rag']['collection_name']}' now has {final_size} documents.")
+    print(f"\nDone. ChromaDB '{cfg['rag']['collection_name']}' now has {final_size} documents.")
+    print(f"Persisted at: {cfg['rag']['chroma_persist_dir']}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/distillation_config.yaml")
+    parser.add_argument("--chroma-dir", default=None, help="Override ChromaDB persist directory")
     args = parser.parse_args()
-    main(args.config)
+    main(args.config, args.chroma_dir)

@@ -5,9 +5,14 @@ This decouples the expensive teacher inference from student training,
 allowing training to restart cheaply without re-running the teacher.
 
 Usage:
-    python scripts/generate_soft_labels.py [--config configs/distillation_config.yaml]
+    python scripts/generate_soft_labels.py [--config ...] [--soft-labels-dir ...] [--chroma-dir ...]
 
-Output: soft_labels/{example_id}.npz with keys: rag_logits, bare_logits, neg_logits
+Output: {soft_labels_dir}/{example_id}.npz with keys: rag_logits, bare_logits, neg_logits
+
+Colab example:
+    python scripts/generate_soft_labels.py \\
+        --soft-labels-dir /content/drive/MyDrive/rad/soft_labels \\
+        --chroma-dir /content/drive/MyDrive/rad/chroma_db
 """
 
 import argparse
@@ -31,9 +36,14 @@ from src.teacher.teacher_model import TeacherModel
 from src.teacher.rag_teacher import RAGTeacher
 
 
-def main(config_path: str) -> None:
+def main(config_path: str, soft_labels_dir: str | None, chroma_dir: str | None, device_map: str | None) -> None:
     with open(config_path) as f:
         cfg = yaml.safe_load(f)
+
+    if soft_labels_dir:
+        cfg["soft_labels"]["output_dir"] = soft_labels_dir
+    if chroma_dir:
+        cfg["rag"]["chroma_persist_dir"] = chroma_dir
 
     output_dir = Path(cfg["soft_labels"]["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -44,7 +54,7 @@ def main(config_path: str) -> None:
     print(f"{len(dataset)} training examples.")
 
     print("Loading teacher model...")
-    teacher = TeacherModel(cfg["models"]["teacher"])
+    teacher = TeacherModel(cfg["models"]["teacher"], device_map=device_map or None)
 
     print("Setting up retriever...")
     embedder = Embedder(cfg["models"]["embedder"])
@@ -73,14 +83,13 @@ def main(config_path: str) -> None:
         collate_fn=collate_fn,
     )
 
-    print(f"Generating soft labels → {output_dir}")
+    print(f"Generating soft labels -> {output_dir}")
     skipped = 0
     for batch_idx, batch in enumerate(tqdm(loader)):
         example_ids = batch["example_id"]
         labels = batch["labels"]
         questions = batch["question_text"]
 
-        # Build decoder inputs
         pad_id = teacher.tokenizer.pad_token_id
         dec = labels.clone()
         dec[dec == -100] = pad_id
@@ -103,10 +112,14 @@ def main(config_path: str) -> None:
 
     total = len(dataset)
     print(f"\nDone. Generated {total - skipped} files, skipped {skipped} already-existing.")
+    print(f"Soft labels at: {output_dir}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/distillation_config.yaml")
+    parser.add_argument("--soft-labels-dir", default=None, help="Override soft labels output directory")
+    parser.add_argument("--chroma-dir", default=None, help="Override ChromaDB directory")
+    parser.add_argument("--device-map", default=None, help="HuggingFace device_map (e.g. 'auto' for Kaggle 2xT4)")
     args = parser.parse_args()
-    main(args.config)
+    main(args.config, args.soft_labels_dir, args.chroma_dir, args.device_map)
