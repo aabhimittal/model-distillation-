@@ -1,0 +1,21 @@
+# Pinned requirements for Google Colab T4.
+# Colab ships: torch, transformers, datasets, numpy, tqdm, pyyaml, accelerate, nltk
+# We add: chromadb + its otel stack, sentence-transformers, evaluate, av.
+#
+# Why these pins:
+#   chromadb 1.5.x needs opentelemetry >=1.42.0; Colab ships 1.38.x.
+#   Upgrading the full otel stack together avoids mixed-version ImportErrors.
+#   google-adk conflict warnings from pip are cosmetic — we never call google-adk.
+#   av (PyAV) provides the torchvision VideoReader backend that datasets probes for.
+
+chromadb==1.5.9
+sentence-transformers==3.4.1
+evaluate==0.4.3
+av==14.4.0
+
+# opentelemetry — must all move together to avoid _exporter_metrics / LogData errors
+opentelemetry-api==1.42.1
+opentelemetry-sdk==1.42.1
+opentelemetry-exporter-otlp-proto-grpc==1.42.1
+opentelemetry-exporter-otlp-proto-common==1.42.1
+opentelemetry-proto==1.42.1
