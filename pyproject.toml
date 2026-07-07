@@ -41,6 +41,12 @@ notebooks = [
 ollama = [
     "ollama>=0.1.8",
 ]
+finetune = [
+    "peft>=0.11.0",
+    "bitsandbytes>=0.43.0",   # 4-bit QLoRA (CUDA); auto-skipped on CPU-only boxes
+    "sentencepiece>=0.2.0",
+    "openai>=1.30.0",         # OpenAI-compatible client for the NVIDIA NIM teacher
+]
 
 [tool.setuptools.packages.find]
 where = ["."]
