@@ -1,0 +1,51 @@
+# Fine-Tuning + Distillation of a small open-source LLM (free-tier Colab T4).
+#
+# Pipeline: a larger open-source *teacher* generates responses on domain prompts,
+# then a small *student* is QLoRA-fine-tuned to imitate them (sequence-level KD).
+# Set teacher.provider to "passthrough" for pure domain fine-tuning (no teacher).
+
+model:
+  student: "Qwen/Qwen2.5-0.5B-Instruct"   # 0.5B — trains on a free T4 in 4-bit
+  teacher: "Qwen/Qwen2.5-3B-Instruct"     # used when teacher.provider == "hf"
+  max_seq_length: 1024
+
+data:
+  name: "gbharti/finance-alpaca"          # swap for any Alpaca/Q&A domain dataset
+  split: "train"
+  max_train_samples: 2000
+  max_eval_samples: 200
+  instruction_key: "instruction"          # remap columns for non-Alpaca schemas
+  input_key: "input"
+  output_key: "output"
+  seed: 42
+
+teacher:
+  provider: "passthrough"                 # "passthrough" | "hf" | "nim"
+  # --- NVIDIA NIM / build.nvidia.com (provider: "nim"), key from $NVIDIA_API_KEY ---
+  nim_base_url: "https://integrate.api.nvidia.com/v1"
+  nim_model: "meta/llama-3.1-8b-instruct"
+  max_new_tokens: 256
+  temperature: 0.7
+  top_p: 0.9
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: ["q_proj", "k_proj", "v_proj", "o_proj"]
+  load_in_4bit: true                      # QLoRA; auto-disabled on CPU-only boxes
+
+train:
+  output_dir: "./outputs/student_finetuned"
+  batch_size: 2
+  gradient_accumulation_steps: 8          # effective batch = 16
+  learning_rate: 2.0e-4
+  num_epochs: 1
+  warmup_ratio: 0.03
+  weight_decay: 0.0
+  logging_steps: 10
+  save_steps: 200
+  fp16: true
+  bf16: false
+  max_grad_norm: 0.3
+  seed: 42
