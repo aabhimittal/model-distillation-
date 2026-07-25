@@ -16,6 +16,7 @@ Colab example:
 """
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -34,6 +35,7 @@ from src.rag.chroma_store import ChromaStore
 from src.rag.retriever import Retriever
 from src.teacher.teacher_model import TeacherModel
 from src.teacher.rag_teacher import RAGTeacher
+from src.distillation.gating import retrieval_utility
 
 
 def main(config_path: str, soft_labels_dir: str | None, chroma_dir: str | None, device_map: str | None) -> None:
@@ -74,7 +76,13 @@ def main(config_path: str, soft_labels_dir: str | None, chroma_dir: str | None, 
         max_target_length=cfg["dataset"]["max_target_length"],
     )
     formatted = dataset.map(fmt, remove_columns=dataset.column_names)
-    formatted.set_format(type="torch", columns=["input_ids", "attention_mask", "labels"])
+    formatted.set_format(
+        type="torch",
+        columns=["input_ids", "attention_mask", "labels"],
+        # Keep question_text / answer_text / example_id as plain Python strings —
+        # without this datasets drops them and the RAG teacher loses its queries.
+        output_all_columns=True,
+    )
 
     loader = DataLoader(
         formatted,
@@ -85,6 +93,7 @@ def main(config_path: str, soft_labels_dir: str | None, chroma_dir: str | None, 
 
     print(f"Generating soft labels -> {output_dir}")
     skipped = 0
+    utilities: dict[str, float] = {}
     for batch_idx, batch in enumerate(tqdm(loader)):
         example_ids = batch["example_id"]
         labels = batch["labels"]
@@ -98,7 +107,17 @@ def main(config_path: str, soft_labels_dir: str | None, chroma_dir: str | None, 
 
         rag_logits, bare_logits, neg_logits = rag_teacher.get_all_logits(questions, decoder_input_ids)
 
+        # Retrieval utility per example — free here, since both logit sets are
+        # already in memory. Drives the curriculum and is the headline diagnostic
+        # for whether the retriever is pulling its weight at all.
+        utility = retrieval_utility(
+            rag_logits.float().cpu(),
+            bare_logits.float().cpu(),
+            labels,
+        )
+
         for i, eid in enumerate(example_ids):
+            utilities[eid] = float(utility[i])
             out_path = output_dir / f"{eid}.npz"
             if out_path.exists():
                 skipped += 1
@@ -108,11 +127,30 @@ def main(config_path: str, soft_labels_dir: str | None, chroma_dir: str | None, 
                 rag_logits=rag_logits[i].cpu().float().numpy(),
                 bare_logits=bare_logits[i].cpu().float().numpy(),
                 neg_logits=neg_logits[i].cpu().float().numpy(),
+                utility=np.float32(utility[i]),
             )
+
+    utilities_path = output_dir / "utilities.json"
+    with open(utilities_path, "w") as f:
+        json.dump(utilities, f)
 
     total = len(dataset)
     print(f"\nDone. Generated {total - skipped} files, skipped {skipped} already-existing.")
     print(f"Soft labels at: {output_dir}")
+
+    u = np.array(list(utilities.values()))
+    helped = float((u > 0).mean())
+    print(
+        f"\nRetrieval utility  mean={u.mean():+.4f}  median={np.median(u):+.4f}\n"
+        f"Retrieval helped on {helped:.1%} of examples "
+        f"(u > 0 means the retrieved context raised the teacher's likelihood of the gold answer)."
+    )
+    if helped < 0.5:
+        print(
+            "  NOTE: retrieval helped on under half the examples. RUG will down-weight\n"
+            "  L_RAG accordingly, but consider raising top_k or improving chunking."
+        )
+    print(f"Utility table at: {utilities_path}")
 
 
 if __name__ == "__main__":

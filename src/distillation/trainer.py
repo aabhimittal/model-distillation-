@@ -143,12 +143,21 @@ class RADTrainer:
                         "L_KL": losses["L_KL"].item(),
                         "L_CRA": losses["L_CRA"].item(),
                         "L_CE": losses["L_CE"].item(),
+                        "L_FUSE": losses["L_FUSE"].item(),
+                        # Gate diagnostics: gate_mean drifting toward 0 means the
+                        # retriever is failing batch-wide and RAD has fallen back
+                        # to standard KD — the single most useful signal to watch.
+                        "gate_mean": losses["gate_mean"].item(),
+                        "utility_mean": losses["utility_mean"].item(),
+                        "fusion_w_mean": losses["fusion_w_mean"].item(),
                     }
                     self.history.append(log_entry)
                     print(
                         f"  step {self.global_step}: loss={log_entry['loss']:.4f}  "
                         f"L_RAG={log_entry['L_RAG']:.4f}  L_KL={log_entry['L_KL']:.4f}  "
-                        f"L_CRA={log_entry['L_CRA']:.4f}  L_CE={log_entry['L_CE']:.4f}"
+                        f"L_CRA={log_entry['L_CRA']:.4f}  L_CE={log_entry['L_CE']:.4f}  "
+                        f"L_FUSE={log_entry['L_FUSE']:.4f}  "
+                        f"gate={log_entry['gate_mean']:.3f}  u={log_entry['utility_mean']:+.3f}"
                     )
 
                 if self.global_step % self.save_steps == 0:
@@ -160,6 +169,17 @@ class RADTrainer:
 
     def train(self, num_epochs: int) -> None:
         for epoch in range(num_epochs):
+            # Advance the retrieval-utility curriculum, if one is attached. The
+            # DataLoader rebuilds its iterator each epoch, so the widened competence
+            # pool takes effect on the next __iter__.
+            sampler = getattr(self.train_loader, "sampler", None)
+            if hasattr(sampler, "set_step"):
+                sampler.set_step(self.global_step)
+                print(
+                    f"Curriculum competence: {sampler.current_competence():.2%} "
+                    f"({len(sampler)} of {len(sampler.ranking)} examples visible)"
+                )
+
             avg_loss = self.train_epoch(epoch)
             print(f"\nEpoch {epoch+1} avg loss: {avg_loss:.4f}\n")
 

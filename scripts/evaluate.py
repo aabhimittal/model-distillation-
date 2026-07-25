@@ -35,6 +35,7 @@ from src.rag.retriever import Retriever
 from src.teacher.teacher_model import TeacherModel
 from src.student.student_model import StudentModel
 from src.evaluation.evaluator import Evaluator
+from src.evaluation.probe import KnowledgeRetentionProbe
 
 
 def generate_predictions(model, tokenizer, loader, device: str, use_rag_retriever=None) -> tuple[list, list]:
@@ -102,7 +103,13 @@ def main(
         max_target_length=cfg["dataset"]["max_target_length"],
     )
     val_formatted = val_ds.map(fmt, remove_columns=val_ds.column_names)
-    val_formatted.set_format(type="torch", columns=["input_ids", "attention_mask", "labels"])
+    val_formatted.set_format(
+        type="torch",
+        columns=["input_ids", "attention_mask", "labels"],
+        # Keep question_text / answer_text / example_id as plain Python strings —
+        # without this datasets drops them and the RAG teacher loses its queries.
+        output_all_columns=True,
+    )
     val_loader = DataLoader(
         val_formatted, batch_size=16, shuffle=False, collate_fn=collate_fn
     )
@@ -118,20 +125,44 @@ def main(
     all_results = {}
 
     print("\n[1/3] Evaluating bare teacher...")
-    preds, refs = generate_predictions(teacher.model, teacher.tokenizer, val_loader, device)
-    all_results["Teacher (bare)"] = evaluator.evaluate(preds, refs)
+    bare_teacher_preds, refs = generate_predictions(
+        teacher.model, teacher.tokenizer, val_loader, device
+    )
+    all_results["Teacher (bare)"] = evaluator.evaluate(bare_teacher_preds, refs)
 
     print("[2/3] Evaluating RAG teacher...")
-    preds, refs = generate_predictions(
+    rag_teacher_preds, refs = generate_predictions(
         teacher.model, teacher.tokenizer, val_loader, device, use_rag_retriever=retriever
     )
-    all_results["Teacher + RAG"] = evaluator.evaluate(preds, refs)
+    all_results["Teacher + RAG"] = evaluator.evaluate(rag_teacher_preds, refs)
 
+    probe_result = None
     if student_rad_path and Path(student_rad_path).exists():
         print("[3/3] Evaluating student (RAD)...")
         student = StudentModel(student_rad_path, device=device)
-        preds, refs = generate_predictions(student.model, student.tokenizer, val_loader, device)
-        all_results["Student (RAD)"] = evaluator.evaluate(preds, refs)
+        student_preds, refs = generate_predictions(
+            student.model, student.tokenizer, val_loader, device
+        )
+        all_results["Student (RAD)"] = evaluator.evaluate(student_preds, refs)
+
+        # Knowledge Retention Probe — the measurement that actually tests the RAD
+        # thesis. Reuses predictions already generated above, so it costs nothing.
+        # The student is also run *with* retrieval to measure how much it still
+        # depends on it; if RAD worked, that should add close to nothing.
+        print("\nRunning Knowledge Retention Probe...")
+        student_rag_preds, _ = generate_predictions(
+            student.model, student.tokenizer, val_loader, device,
+            use_rag_retriever=retriever,
+        )
+        probe = KnowledgeRetentionProbe()
+        probe_result = probe.evaluate(
+            student_preds=student_preds,
+            bare_teacher_preds=bare_teacher_preds,
+            rag_teacher_preds=rag_teacher_preds,
+            references=refs,
+            student_with_retrieval_preds=student_rag_preds,
+        )
+        print("\n" + probe.format_report(probe_result))
     else:
         print("[3/3] Student RAD checkpoint not found — skipping.")
 
@@ -141,11 +172,19 @@ def main(
     print(evaluator.compare_models(all_results))
     print("=" * 62)
 
-    results_path = Path(cfg["training"]["output_dir"]) / "eval_results.json"
-    results_path.parent.mkdir(parents=True, exist_ok=True)
+    output_root = Path(cfg["training"]["output_dir"])
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    results_path = output_root / "eval_results.json"
     with open(results_path, "w") as f:
         json.dump(all_results, f, indent=2)
     print(f"\nResults saved to {results_path}")
+
+    if probe_result is not None:
+        probe_path = output_root / "retention_probe.json"
+        with open(probe_path, "w") as f:
+            json.dump(probe_result, f, indent=2)
+        print(f"Retention probe saved to {probe_path}")
 
 
 if __name__ == "__main__":

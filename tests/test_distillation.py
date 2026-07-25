@@ -75,12 +75,100 @@ def test_cra_zero_when_rag_equals_neg():
 
 
 def test_temperature_scaling_weights():
-    """With alpha=1, beta=0, gamma=0, delta=0, total should equal L_RAG."""
-    loss_fn = RADLoss(alpha=1.0, beta=0.0, gamma=0.0, delta=0.0)
+    """With only alpha non-zero, total should equal L_RAG."""
+    loss_fn = RADLoss(alpha=1.0, beta=0.0, gamma=0.0, delta=0.0, epsilon=0.0)
     s, r, b, n = _random_logits(), _random_logits(), _random_logits(), _random_logits()
     labels = _random_labels()
     result = loss_fn(s, r, b, n, labels)
     assert abs(result["total"].item() - result["L_RAG"].item()) < 1e-4
+
+
+def test_total_is_the_weighted_sum_of_all_five_components():
+    w = dict(alpha=0.5, beta=0.2, gamma=0.1, delta=0.2, epsilon=0.3)
+    loss_fn = RADLoss(**w)
+    result = loss_fn(
+        _random_logits(), _random_logits(), _random_logits(), _random_logits(), _random_labels()
+    )
+    expected = (
+        w["alpha"] * result["L_RAG"]
+        + w["beta"] * result["L_KL"]
+        + w["gamma"] * result["L_CRA"]
+        + w["delta"] * result["L_CE"]
+        + w["epsilon"] * result["L_FUSE"]
+    )
+    assert abs(result["total"].item() - expected.item()) < 1e-4
+
+
+def test_epsilon_zero_disables_fusion_entirely():
+    loss_fn = RADLoss(epsilon=0.0)
+    result = loss_fn(
+        _random_logits(), _random_logits(), _random_logits(), _random_logits(), _random_labels()
+    )
+    assert loss_fn.trf is None
+    assert result["L_FUSE"].item() == 0.0
+
+
+def test_rug_shifts_loss_toward_the_better_teacher():
+    """
+    Core RUG behaviour: when retrieval demonstrably helped, L_RAG should carry more
+    weight than it does when retrieval hurt. With use_rug=False both are ungated
+    and the gate reports a constant 0.5.
+    """
+    torch.manual_seed(0)
+    labels = torch.randint(0, V, (B, L))
+    student = _random_logits()
+
+    # A teacher that nails the gold answer vs. one that is uniform
+    def confident(strength):
+        lg = torch.zeros(B, L, V)
+        lg.scatter_(-1, labels.unsqueeze(-1), strength)
+        return lg
+
+    gated = RADLoss(use_rug=True, epsilon=0.0)
+
+    helped = gated(student, confident(10.0), torch.zeros(B, L, V), _random_logits(), labels)
+    hurt = gated(student, torch.zeros(B, L, V), confident(10.0), _random_logits(), labels)
+
+    assert helped["gate_mean"].item() > 0.9, "gate should trust the RAG teacher"
+    assert hurt["gate_mean"].item() < 0.1, "gate should distrust the RAG teacher"
+    assert helped["utility_mean"].item() > 0 > hurt["utility_mean"].item()
+
+
+def test_disabling_rug_gives_a_neutral_constant_gate():
+    loss_fn = RADLoss(use_rug=False)
+    result = loss_fn(
+        _random_logits(), _random_logits(), _random_logits(), _random_logits(), _random_labels()
+    )
+    assert loss_fn.rug is None
+    assert result["gate_mean"].item() == pytest.approx(0.5)
+
+
+def test_kl_ignores_padding_positions():
+    """
+    Padding must not dilute the KL. Two batches identical on valid positions but
+    differing wildly on padded ones should produce the same L_RAG.
+    """
+    torch.manual_seed(0)
+    labels = torch.full((B, L), IGNORE)
+    labels[:, :4] = torch.randint(0, V, (B, 4))  # only first 4 positions are real
+
+    student = _random_logits()
+    rag = _random_logits()
+    bare = _random_logits()
+    neg = _random_logits()
+
+    loss_fn = RADLoss(epsilon=0.0)
+    a = loss_fn(student, rag, bare, neg, labels)
+
+    # Perturb only the padded tail of the teacher's logits
+    rag_perturbed = rag.clone()
+    rag_perturbed[:, 4:, :] += torch.randn(B, L - 4, V) * 100
+
+    b_ = loss_fn(student, rag_perturbed, bare, neg, labels)
+
+    assert abs(a["L_RAG"].item() - b_["L_RAG"].item()) < 1e-3, (
+        "padding positions leaked into L_RAG"
+    )
 
 
 def test_gradient_flows_through_student_only():
