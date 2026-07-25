@@ -1,4 +1,73 @@
-# RAG-Augmented Distillation (RAD)
+# Fine-Tuning & Distillation of Small Open-Source Models
+
+> **Copy the capabilities of a massive model into a small, private, efficient one — on a free-tier GPU.**
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/aabhimittal/model-distillation-/blob/main/notebooks/colab_finetune_distill.ipynb)
+
+This repo ships **two complementary tracks** for shrinking a large model's capability into a small one you can run yourself:
+
+| Track | What it does | Where it runs | Start here |
+|-------|--------------|---------------|-----------|
+| **A — Fine-Tuning + Distillation** | QLoRA-fine-tune a small open-source LLM (0.5B) on specialised-domain data, distilling a larger teacher's responses (sequence-level KD). Teacher can be local, or a remote **NVIDIA NIM** API. | **Free Colab T4 (15 GB)** | [`src/finetune/`](src/finetune) + [Colab notebook](notebooks/colab_finetune_distill.ipynb) |
+| **B — RAG-Augmented Distillation (RAD)** | A novel logit-level KD method that distils a *RAG pipeline* into a standalone seq2seq student — no retrieval at inference. | Colab / Kaggle T4 | [`src/distillation/`](src/distillation) |
+
+**Track A** is the direct answer to "fine-tune & distill a small OSS model on a free GPU"; **Track B** is a research-grade extension. The sections below cover Track A first, then RAD.
+
+---
+
+# Track A — Fine-Tuning + Distillation (small LLM, QLoRA, free Colab)
+
+Take a small open-source instruction model (default **`Qwen/Qwen2.5-0.5B-Instruct`**) and specialise it on domain data using **4-bit QLoRA** — the base is frozen and quantised, only tiny LoRA adapters train, so it fits a free T4. To *distil* (rather than just fine-tune), a larger teacher generates the training targets via **sequence-level knowledge distillation** (Kim & Rush, 2016), which is tokenizer-agnostic and works even when the teacher is a different model family or a remote API.
+
+```
+Domain prompts ──▶ Teacher (large OSS model, local or NVIDIA NIM) ──▶ responses
+                                                                         │
+                                                        distillation targets
+                                                                         ▼
+        Small student (Qwen2.5-0.5B) ── QLoRA SFT ──▶ specialised private model
+                                                       (few-MB LoRA adapter)
+```
+
+### Quickstart (Track A)
+
+```bash
+pip install -e ".[finetune]"
+
+# Pure domain fine-tuning (no teacher, smallest footprint):
+python scripts/finetune_distill.py --max-train 800 --epochs 1
+
+# Distil a local larger teacher into the student:
+python scripts/finetune_distill.py --teacher hf
+
+# Distil an NVIDIA NIM teacher (free credits at build.nvidia.com; no local teacher GPU):
+export NVIDIA_API_KEY=nvapi-...
+python scripts/finetune_distill.py --teacher nim
+
+# Use your fine-tuned model:
+python scripts/infer.py --adapter outputs/student_finetuned \
+    --prompt "Explain what an ETF is in one sentence."
+```
+
+The one-click path is the **[Colab notebook](notebooks/colab_finetune_distill.ipynb)** — click the badge above.
+
+### NVIDIA open-source cloud as the teacher
+
+Set `teacher.provider: "nim"` (config) or `--teacher nim` (CLI) to use an NVIDIA-hosted open model (e.g. `meta/llama-3.1-8b-instruct`) as the teacher over the OpenAI-compatible endpoint at `https://integrate.api.nvidia.com/v1`. Get free developer credits at [build.nvidia.com](https://build.nvidia.com) and export `NVIDIA_API_KEY`. This gives you a strong teacher signal with **zero local teacher GPU** — the student QLoRA fine-tune still runs on the free Colab T4. NVIDIA Brev / launchables can host the full run if you outgrow the free tier.
+
+### Swapping in your own domain
+
+Point `data.name` at any Alpaca- or Q&A-style HF dataset and remap its columns via the `*_key` fields in [`configs/finetune_config.yaml`](configs/finetune_config.yaml) — no code changes:
+
+```yaml
+data:
+  name: "medalpaca/medical_meadow_medical_flashcards"
+  instruction_key: "input"     # remap non-Alpaca column names
+  output_key: "output"
+```
+
+---
+
+# Track B — RAG-Augmented Distillation (RAD)
 
 > **Distill a RAG pipeline into a standalone model — no retrieval needed at inference.**
 
@@ -191,15 +260,13 @@ The interesting comparison for the fusion term is `ε>0, α=β=0` (pure token-le
 
 ---
 
-## Progressive Learning Notebooks
+## Notebooks
 
-| Notebook | Concept |
-|----------|---------|
-| `01_concept_introduction.ipynb` | What is distillation? Why does retrieval matter? |
-| `02_rag_setup.ipynb` | Build ChromaDB, visualise retrieved passages with t-SNE |
-| `03_teacher_soft_labels.ipynb` | Compare teacher distributions with/without RAG (KL histogram) |
-| `04_distillation_training.ipynb` | Train on 1000 examples, watch each loss component converge |
-| `05_evaluation_comparison.ipynb` | Final comparison table + bar charts across all 4 conditions |
+| Notebook | Track | Concept |
+|----------|-------|---------|
+| [`colab_finetune_distill.ipynb`](notebooks/colab_finetune_distill.ipynb) | A | End-to-end QLoRA fine-tuning + distillation of a small LLM on a free T4 — install, load domain data, (optional) teacher distillation, train, infer. |
+
+The RAD progressive-learning notebooks (`01_concept` … `05_evaluation`) are on the roadmap; RAD is fully runnable today via the `scripts/` pipeline below.
 
 ---
 
@@ -227,24 +294,31 @@ pytest tests/ -v -m "slow"
 
 ```
 model-distillation-/
-├── configs/distillation_config.yaml   <- all hyperparameters
+├── configs/
+│   ├── finetune_config.yaml       <- Track A: QLoRA fine-tune + distill
+│   └── distillation_config.yaml   <- Track B: RAD hyperparameters
 ├── src/
-│   ├── data/          <- SQuAD loading, chunking, formatting
-│   ├── rag/           <- ChromaDB store, MiniLM embedder, retriever
-│   ├── teacher/       <- frozen teacher + RAG-augmented teacher
-│   ├── student/       <- trainable student
-│   ├── distillation/
+│   ├── finetune/      <- Track A: config, data, QLoRA model, teacher, SFT trainer
+│   ├── data/          <- SQuAD loading, chunking, formatting  (RAD)
+│   ├── rag/           <- ChromaDB store, MiniLM embedder, retriever  (RAD)
+│   ├── teacher/       <- frozen teacher + RAG-augmented teacher  (RAD)
+│   ├── student/       <- trainable student  (RAD)
+│   ├── distillation/                                          (RAD)
 │   │   ├── loss.py        <- RADLoss (5 components)
 │   │   ├── gating.py      <- retrieval utility, RUG + TRF gates
 │   │   ├── curriculum.py  <- retrieval-utility curriculum sampler
 │   │   └── trainer.py     <- RADTrainer
-│   └── evaluation/
+│   └── evaluation/                                            (RAD)
 │       ├── evaluator.py   <- EM, F1, BLEU-4, comparison table
 │       ├── probe.py       <- Knowledge Retention Probe
 │       └── calibration.py <- ECE, sequence confidence
-├── scripts/           <- 4-phase pipeline (build -> labels -> train -> eval)
-├── notebooks/         <- progressive learning arc
-└── tests/             <- 72 unit tests (CI-safe, no GPU required)
+├── scripts/
+│   ├── finetune_distill.py        <- Track A entrypoint
+│   ├── infer.py                   <- run a fine-tuned adapter
+│   └── build_vector_db.py …       <- Track B 4-phase pipeline
+├── notebooks/         <- colab_finetune_distill.ipynb (Track A)
+│                         progressive learning arc (Track B)
+└── tests/             <- 90 unit tests (CI-safe, no GPU required)
 ```
 
 ---
