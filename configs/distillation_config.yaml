@@ -21,11 +21,31 @@ rag:
 
 distillation:
   temperature: 4.0
-  alpha: 0.5    # L_RAG weight  (student vs RAG-augmented teacher)
-  beta: 0.2     # L_KL weight   (student vs bare teacher)
-  gamma: 0.1    # L_CRA weight  (contrastive retrieval alignment)
-  delta: 0.2    # L_CE weight   (hard-label grounding)
+  alpha: 0.5      # L_RAG weight   (student vs RAG-augmented teacher)
+  beta: 0.2       # L_KL weight    (student vs bare teacher)
+  gamma: 0.1      # L_CRA weight   (contrastive retrieval alignment)
+  delta: 0.2      # L_CE weight    (hard-label grounding)
+  epsilon: 0.3    # L_FUSE weight  (token-level retrieval fusion); 0 disables TRF
   cra_margin: 0.5
+
+  # Retrieval-Utility Gating (RUG) — per-example adaptive alpha/beta.
+  # Routes each example's soft-target mass toward whichever teacher actually
+  # answered it better. Set use_rug: false to revert to fixed global weights.
+  use_rug: true
+  gate_temperature: 1.0   # lower = sharper routing; 1.0 gives a gentle sigmoid
+  gate_floor: 0.05        # never fully abandon the bare teacher
+  gate_ceiling: 0.95      # never fully abandon the RAG teacher
+
+  # Token-level Retrieval Fusion (TRF) — per-token teacher blending by confidence.
+  fusion_temperature: 1.0
+  fusion_center: true     # remove the batch-mean entropy bias; see gating.py
+
+curriculum:
+  # Order training data by retrieval utility: clean-retrieval examples first.
+  enabled: true
+  initial_competence: 0.25   # fraction of data visible at step 0
+  # Curriculum reaches full data at this fraction of total training steps
+  ramp_fraction: 0.5
 
 training:
   batch_size: 8

@@ -9,14 +9,28 @@ from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
 
 class StudentModel:
-    def __init__(self, model_name: str = "google/flan-t5-small", device: Optional[str] = None):
+    def __init__(
+        self,
+        model_name: str = "google/flan-t5-small",
+        device: Optional[str] = None,
+        device_map: Optional[str] = None,
+    ):
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = device
         self.model_name = model_name
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModelForSeq2SeqLM.from_pretrained(model_name).to(device)
+
+        load_kwargs: dict = {}
+        if device_map:
+            load_kwargs["device_map"] = device_map
+
+        self.model = AutoModelForSeq2SeqLM.from_pretrained(model_name, **load_kwargs)
+
+        if not device_map:
+            self.model = self.model.to(device)
+
         self.model.gradient_checkpointing_enable()
 
     def forward(
