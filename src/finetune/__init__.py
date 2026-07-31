@@ -17,18 +17,48 @@ from .chat import (
     normalize_record,
     to_messages,
 )
+from .budget import (
+    bucket_by_length,
+    estimate_teacher_cost,
+    estimate_tokens,
+    length_stats,
+    padding_waste,
+    record_lengths,
+    sequential_batches,
+)
 from .config import (
+    CurationConfig,
     DataConfig,
     FinetuneConfig,
     LoraConfig,
     ModelConfig,
+    RobustnessConfig,
     TeacherConfig,
     TrainConfig,
 )
+from .curate import (
+    CurationReport,
+    CurationThresholds,
+    classify_record,
+    curate_records,
+    is_degenerate,
+    is_refusal,
+    leaks_prompt,
+    looks_truncated,
+)
+from .dedup import decontaminate, exact_dedup, jaccard, near_dedup, shingles
 from .distill import (
     VALID_PROVIDERS,
     make_distillation_records,
     resolve_provider,
+)
+from .robust import (
+    JsonlCheckpoint,
+    RateLimiter,
+    RetryPolicy,
+    merge_checkpoint,
+    pending_indices,
+    retry_call,
 )
 
 __all__ = [
@@ -38,13 +68,45 @@ __all__ = [
     "has_trainable_labels",
     "normalize_record",
     "to_messages",
+    "CurationConfig",
     "DataConfig",
     "FinetuneConfig",
     "LoraConfig",
     "ModelConfig",
+    "RobustnessConfig",
     "TeacherConfig",
     "TrainConfig",
     "VALID_PROVIDERS",
     "make_distillation_records",
     "resolve_provider",
+    # curation
+    "CurationReport",
+    "CurationThresholds",
+    "classify_record",
+    "curate_records",
+    "is_degenerate",
+    "is_refusal",
+    "leaks_prompt",
+    "looks_truncated",
+    # dedup / decontamination
+    "decontaminate",
+    "exact_dedup",
+    "jaccard",
+    "near_dedup",
+    "shingles",
+    # budgeting
+    "bucket_by_length",
+    "estimate_teacher_cost",
+    "estimate_tokens",
+    "length_stats",
+    "padding_waste",
+    "record_lengths",
+    "sequential_batches",
+    # robustness
+    "JsonlCheckpoint",
+    "RateLimiter",
+    "RetryPolicy",
+    "merge_checkpoint",
+    "pending_indices",
+    "retry_call",
 ]

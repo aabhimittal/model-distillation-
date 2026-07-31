@@ -28,6 +28,23 @@ teacher:
   temperature: 0.7
   top_p: 0.9
 
+curation:
+  enabled: true
+  drop_refusals: true                     # teacher refusals teach the student to refuse
+  drop_truncated: true                    # generations that hit max_new_tokens mid-sentence
+  max_ngram_repeat_ratio: 0.55            # above this = decoder repetition loop
+  min_chars: 8
+  dedup: true
+  dedup_threshold: 0.85                   # Jaccard on char 5-grams; 1.0 = exact only
+  decontaminate: true                     # drop train rows that leak into the eval split
+
+robustness:                               # long remote teacher runs (provider: "nim")
+  max_attempts: 5
+  base_delay: 1.0
+  max_delay: 60.0
+  requests_per_second: 4.0                # 0 disables rate limiting
+  checkpoint_path: "./outputs/teacher_cache.jsonl"   # resume after a crash; "" disables
+
 lora:
   r: 16
   alpha: 32
