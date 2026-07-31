@@ -17,10 +17,18 @@ Three providers:
 from __future__ import annotations
 
 import os
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from .chat import to_messages
-from .config import TeacherConfig
+from .config import RobustnessConfig, TeacherConfig
+from .robust import (
+    JsonlCheckpoint,
+    RateLimiter,
+    RetryPolicy,
+    merge_checkpoint,
+    pending_indices,
+    retry_call,
+)
 
 VALID_PROVIDERS = ("passthrough", "hf", "nim")
 
@@ -50,8 +58,9 @@ class NIMTeacher:
     frontier-class teacher signal.
     """
 
-    def __init__(self, cfg: TeacherConfig):
+    def __init__(self, cfg: TeacherConfig, robustness: Optional[RobustnessConfig] = None):
         self.cfg = cfg
+        self.robustness = robustness or RobustnessConfig()
         self.api_key = os.environ.get("NVIDIA_API_KEY")
         if not self.api_key:
             raise RuntimeError(
@@ -66,19 +75,46 @@ class NIMTeacher:
         return OpenAI(base_url=self.cfg.nim_base_url, api_key=self.api_key)
 
     def generate(self, records: List[Dict[str, str]]) -> List[str]:
+        """Generate targets with retry, rate limiting and crash-resume.
+
+        A long remote run is expected to fail partway (throttling, Colab
+        disconnects). Completed generations are appended to a JSONL checkpoint as
+        they land, so a re-run resumes instead of re-paying for finished work.
+        """
         client = self._client()
-        outputs: List[str] = []
-        for r in records:
-            messages = to_messages(r.get("instruction", ""), r.get("input", ""))
-            resp = client.chat.completions.create(
-                model=self.cfg.nim_model,
-                messages=messages,
-                max_tokens=self.cfg.max_new_tokens,
-                temperature=self.cfg.temperature,
-                top_p=self.cfg.top_p,
-            )
-            outputs.append((resp.choices[0].message.content or "").strip())
-        return outputs
+        rb = self.robustness
+        policy = RetryPolicy(
+            max_attempts=rb.max_attempts,
+            base_delay=rb.base_delay,
+            max_delay=rb.max_delay,
+        )
+        limiter = RateLimiter(rb.requests_per_second) if rb.requests_per_second > 0 else None
+        ckpt = JsonlCheckpoint(rb.checkpoint_path) if rb.checkpoint_path else None
+
+        done: Dict[int, str] = ckpt.load() if ckpt else {}
+        todo = pending_indices(len(records), done)
+
+        for idx in todo:
+            r = records[idx]
+            if limiter:
+                limiter.acquire()
+
+            def _call():
+                return client.chat.completions.create(
+                    model=self.cfg.nim_model,
+                    messages=to_messages(r.get("instruction", ""), r.get("input", "")),
+                    max_tokens=self.cfg.max_new_tokens,
+                    temperature=self.cfg.temperature,
+                    top_p=self.cfg.top_p,
+                )
+
+            resp = retry_call(_call, policy)
+            text = (resp.choices[0].message.content or "").strip()
+            done[idx] = text
+            if ckpt:
+                ckpt.append(idx, text)
+
+        return merge_checkpoint(len(records), done)
 
 
 class HFTeacher:
@@ -140,13 +176,15 @@ class HFTeacher:
         return outputs
 
 
-def build_teacher(cfg: TeacherConfig, model_name: str = ""):
+def build_teacher(
+    cfg: TeacherConfig, model_name: str = "", robustness: Optional[RobustnessConfig] = None
+):
     """Factory: return the teacher implementation for the configured provider."""
     provider = resolve_provider(cfg)
     if provider == "passthrough":
         return PassthroughTeacher()
     if provider == "nim":
-        return NIMTeacher(cfg)
+        return NIMTeacher(cfg, robustness)
     return HFTeacher(cfg, model_name)
 
 

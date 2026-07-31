@@ -65,6 +65,33 @@ data:
   output_key: "output"
 ```
 
+### Production hardening
+
+Sequence-level KD trains the student on whatever the teacher *said*, so the student's ceiling is the teacher's **worst** outputs, not its average. Over thousands of prompts a small fraction of generations are fluent but unusable — and because they're fluent, the loss curve never reveals them. Track A gates them out before training:
+
+| Failure mode | Detector | Why it matters |
+|---|---|---|
+| Decoder repetition loop (`"the the the…"`) | n-gram repeat ratio + consecutive-run length | Teaches the student to loop |
+| Teacher refusal (`"I'm sorry, I cannot…"`) | anchored head-of-response patterns | Teaches the student to refuse its own domain |
+| Prompt echo / chat-template leakage | instruction-prefix + marker match | Student parrots scaffolding (`### Response:`) |
+| Truncation at `max_new_tokens` | missing terminal punctuation (script-aware) | Teaches the student to stop mid-sentence |
+| Duplicates & near-duplicates | char-5-gram Jaccard over an inverted index | Over-weighted rows → memorisation |
+| **Train/eval contamination** | same, applied across splits | Scores measure memorisation, not generalisation |
+
+This is the Track-A analogue of RAD's `L_CRA`: both ask *"is the teacher's signal on this example worth imitating?"* — RAD inspects logits, Track A inspects decoded text, since sequence-level KD has no logits to compare.
+
+Curation runs automatically and prints a report; disable with `--no-curation` / `--no-dedup`.
+
+```
+curation: kept 1847/2000 (92.4%) | dropped: degenerate_repetition=61, refusal=48, truncated=39, prompt_leak=5
+dedup: removed 112 duplicate/near-duplicate records
+decontamination: removed 9 train rows leaking into eval
+```
+
+**Free-tier cost controls** (`src/finetune/budget.py`) — a pre-flight token/spend estimate catches a run that would exhaust a NIM quota at second zero, and **length-bucketed batching** groups similar-length sequences so the T4 stops paying for pad tokens. On a realistically skewed batch that is **49.3% → 1.3% padding waste**; padding costs exactly as much GPU time as real tokens.
+
+**Fault tolerance for remote teachers** (`src/finetune/robust.py`) — a 2,000-prompt NIM run *will* hit a 429 and a Colab disconnect. Retries use exponential backoff with **full jitter** (fixed delays make parallel workers retry in lockstep and re-trigger the throttle), a token-bucket limiter smooths bursts, and every completed generation is appended to a JSONL checkpoint, so a crash resumes instead of re-paying. 4xx errors other than 429 fail fast rather than burning quota.
+
 ---
 
 # Track B — RAG-Augmented Distillation (RAD)

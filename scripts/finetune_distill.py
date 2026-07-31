@@ -35,6 +35,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-train", type=int, default=None, help="Cap training samples.")
     p.add_argument("--epochs", type=int, default=None, help="Override num_epochs.")
     p.add_argument("--output-dir", default=None, help="Override output dir.")
+    p.add_argument("--no-curation", action="store_true",
+                   help="Skip the teacher-output quality gate (keep every record).")
+    p.add_argument("--no-dedup", action="store_true",
+                   help="Skip duplicate removal and train/eval decontamination.")
     return p.parse_args()
 
 
@@ -55,9 +59,22 @@ def main() -> None:
         cfg.train.num_epochs = args.epochs
     if args.output_dir:
         cfg.train.output_dir = args.output_dir
+    if args.no_curation:
+        cfg.curation.enabled = False
+    if args.no_dedup:
+        cfg.curation.dedup = False
+        cfg.curation.decontaminate = False
 
     # Heavy imports deferred until after arg parsing so --help stays instant.
+    from src.finetune.budget import (
+        estimate_teacher_cost,
+        estimate_tokens,
+        length_stats,
+        record_lengths,
+    )
+    from src.finetune.curate import CurationThresholds, curate_records
     from src.finetune.data import load_domain_dataset, records_to_dicts, train_eval_split
+    from src.finetune.dedup import decontaminate, near_dedup
     from src.finetune.distill import build_teacher, make_distillation_records, resolve_provider
     from src.finetune.model import build_student, count_trainable_parameters
     from src.finetune.train import train_student
@@ -74,10 +91,54 @@ def main() -> None:
     if provider == "passthrough":
         print("      passthrough -> fine-tuning on the dataset's gold answers.")
     else:
-        teacher = build_teacher(cfg.teacher, cfg.model.teacher)
+        cost = estimate_teacher_cost(
+            len(train_records),
+            avg_prompt_tokens=int(
+                sum(estimate_tokens(r["instruction"]) for r in train_records)
+                / max(1, len(train_records))
+            ),
+            max_new_tokens=cfg.teacher.max_new_tokens,
+        )
+        print(f"      pre-flight: ~{cost['total_tokens']:,} teacher tokens (upper bound)")
+        teacher = build_teacher(cfg.teacher, cfg.model.teacher, cfg.robustness)
         teacher_outputs = teacher.generate(train_records)
         train_records = make_distillation_records(train_records, teacher_outputs)
         print(f"      generated {len(teacher_outputs)} teacher responses.")
+
+    if cfg.curation.enabled:
+        th = CurationThresholds(
+            max_ngram_repeat_ratio=cfg.curation.max_ngram_repeat_ratio,
+            min_chars=cfg.curation.min_chars,
+            drop_refusals=cfg.curation.drop_refusals,
+            drop_truncated=cfg.curation.drop_truncated,
+        )
+        train_records, report = curate_records(train_records, th)
+        print(f"      {report.summary()}")
+        if not train_records:
+            raise SystemExit(
+                "All training records were rejected by curation. Loosen the "
+                "thresholds in configs/finetune_config.yaml (curation:) or inspect "
+                "the teacher outputs — this usually means the teacher failed."
+            )
+
+    if cfg.curation.dedup:
+        train_records, n_dup = near_dedup(train_records, cfg.curation.dedup_threshold)
+        print(f"      dedup: removed {n_dup} duplicate/near-duplicate records")
+    if cfg.curation.decontaminate:
+        train_records, n_leak = decontaminate(
+            train_records, eval_records, cfg.curation.dedup_threshold
+        )
+        print(f"      decontamination: removed {n_leak} train rows leaking into eval")
+
+    stats = length_stats(record_lengths(train_records), cfg.model.max_seq_length)
+    print(f"      length: {stats.as_dict()}")
+    if stats.over_limit:
+        print(
+            f"      WARNING: {stats.over_limit} record(s) exceed max_seq_length="
+            f"{cfg.model.max_seq_length} and will be truncated."
+        )
+    if not train_records:
+        raise SystemExit("No training records survived filtering — nothing to train on.")
 
     print(f"[3/4] Building student '{cfg.model.student}' with QLoRA ...")
     model, tokenizer = build_student(cfg.model, cfg.lora)

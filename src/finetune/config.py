@@ -52,6 +52,35 @@ class TeacherConfig:
 
 
 @dataclass
+class CurationConfig:
+    """Quality gate on teacher outputs + dataset hygiene (see curate.py, dedup.py)."""
+
+    enabled: bool = True
+    drop_refusals: bool = True
+    drop_truncated: bool = True
+    max_ngram_repeat_ratio: float = 0.55
+    min_chars: int = 8
+    # Near-duplicate Jaccard threshold; 1.0 degrades to exact-match dedup only.
+    dedup_threshold: float = 0.85
+    dedup: bool = True
+    # Remove train rows that leak into the eval split (measurement integrity).
+    decontaminate: bool = True
+
+
+@dataclass
+class RobustnessConfig:
+    """Retry / rate-limit / resume behaviour for remote teacher generation."""
+
+    max_attempts: int = 5
+    base_delay: float = 1.0
+    max_delay: float = 60.0
+    # Requests per second against the teacher endpoint (0 disables limiting).
+    requests_per_second: float = 4.0
+    # JSONL resume log; empty string disables checkpointing.
+    checkpoint_path: str = "./outputs/teacher_cache.jsonl"
+
+
+@dataclass
 class LoraConfig:
     r: int = 16
     alpha: int = 32
@@ -85,6 +114,8 @@ class FinetuneConfig:
     model: ModelConfig = field(default_factory=ModelConfig)
     data: DataConfig = field(default_factory=DataConfig)
     teacher: TeacherConfig = field(default_factory=TeacherConfig)
+    curation: CurationConfig = field(default_factory=CurationConfig)
+    robustness: RobustnessConfig = field(default_factory=RobustnessConfig)
     lora: LoraConfig = field(default_factory=LoraConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
 
@@ -101,6 +132,8 @@ class FinetuneConfig:
             model=cls._section(ModelConfig, raw.get("model")),
             data=cls._section(DataConfig, raw.get("data")),
             teacher=cls._section(TeacherConfig, raw.get("teacher")),
+            curation=cls._section(CurationConfig, raw.get("curation")),
+            robustness=cls._section(RobustnessConfig, raw.get("robustness")),
             lora=cls._section(LoraConfig, raw.get("lora")),
             train=cls._section(TrainConfig, raw.get("train")),
         )
